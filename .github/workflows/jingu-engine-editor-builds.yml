@@ -20,29 +20,27 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: JINGU_ENGINE_CLEANUP79_SOURCE.zip
-  SOURCE_SHA256: b8296eef580c727db0ba2cd81d7b9f09c5264710b5f73f13c198bb9c1a108059
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP80_SOURCE.zip
+  SOURCE_SHA256: e7c2ce9a0486d3d73288eba12ee56be3eff8f2462933ebd32fa8dd1a78c36942
 
 jobs:
   windows-x64:
     name: Windows x64 - Editor
     runs-on: windows-2022
     timeout-minutes: 240
-
     steps:
       - name: Checkout build repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Verify C79 source ZIP
+      - name: Verify C80 source ZIP
         shell: pwsh
         run: |
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:SOURCE_SHA256) {
             throw "Source ZIP SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual"
           }
-          Write-Host "Source ZIP SHA-256 OK."
 
       - name: Extract source
         shell: pwsh
@@ -50,9 +48,7 @@ jobs:
           Remove-Item "source" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path "source" | Out-Null
           Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath "source" -Force
-          if (-not (Test-Path "source\Engine\SConstruct")) {
-            throw "Engine/SConstruct was not found after extraction."
-          }
+          if (-not (Test-Path "source\Engine\SConstruct")) { throw "Engine/SConstruct not found." }
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -82,7 +78,6 @@ jobs:
             accesskit=no `
             angle=no `
             -j4 2>&1 | Tee-Object -FilePath "..\..\build-windows-x64.log"
-
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows x64 build log
@@ -101,17 +96,22 @@ jobs:
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
           $bin = Get-ChildItem "source\Engine\bin" -File |
-            Where-Object {
-              $_.Name -like "*.windows.editor.x86_64*.exe" -and
-              $_.Name -notlike "*.console.*"
-            } |
+            Where-Object { $_.Name -like "*.windows.editor.x86_64.exe" } |
+            Select-Object -First 1
+          $console = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object { $_.Name -like "*.windows.editor.x86_64.console.exe" } |
             Select-Object -First 1
 
           if (-not $bin) { throw "Windows x64 editor binary not found." }
+          if (-not $console) { throw "Windows x64 console wrapper not found." }
 
           Copy-Item $bin.FullName "$out\JinguEngine.exe"
-          $hash = (Get-FileHash "$out\JinguEngine.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  JinguEngine.exe" | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
+          Copy-Item $console.FullName "$out\JinguEngine.console.exe"
+          Copy-Item "source\Engine\LICENSE.txt" "$out\LICENSE.txt"
+          Copy-Item "source\Engine\JINGU_LICENSE.txt" "$out\JINGU_LICENSE.txt"
+          Copy-Item "source\Engine\COPYRIGHT.txt" "$out\COPYRIGHT.txt"
+          Copy-Item "source\Engine\JINGU_NOTICE.txt" "$out\JINGU_NOTICE.txt"
+          Copy-Item "source\Engine\JINGU_README.md" "$out\README.md"
 
           @"
           Jingu Engine ${{ inputs.version }}
@@ -123,7 +123,17 @@ jobs:
           Source ZIP: $env:SOURCE_ZIP
           Source SHA-256: $env:SOURCE_SHA256
           Workflow commit: $env:GITHUB_SHA
+          Runtime validation: Windows x64 requires maintainer smoke after artifact download.
           "@ | Set-Content "$out\BUILD_INFO.txt" -Encoding utf8
+
+          $lines = Get-ChildItem $out -File |
+            Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
 
       - name: Upload Windows x64 editor
         uses: actions/upload-artifact@v4
@@ -137,21 +147,19 @@ jobs:
     name: Windows ARM64 - Editor
     runs-on: windows-11-arm
     timeout-minutes: 240
-
     steps:
       - name: Checkout build repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Verify C79 source ZIP
+      - name: Verify C80 source ZIP
         shell: pwsh
         run: |
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:SOURCE_SHA256) {
             throw "Source ZIP SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual"
           }
-          Write-Host "Source ZIP SHA-256 OK."
 
       - name: Extract source
         shell: pwsh
@@ -159,9 +167,7 @@ jobs:
           Remove-Item "source" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path "source" | Out-Null
           Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath "source" -Force
-          if (-not (Test-Path "source\Engine\SConstruct")) {
-            throw "Engine/SConstruct was not found after extraction."
-          }
+          if (-not (Test-Path "source\Engine\SConstruct")) { throw "Engine/SConstruct not found." }
 
       - name: Install SCons
         shell: pwsh
@@ -187,7 +193,6 @@ jobs:
             accesskit=no `
             angle=no `
             -j4 2>&1 | Tee-Object -FilePath "..\..\build-windows-arm64.log"
-
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows ARM64 build log
@@ -206,17 +211,22 @@ jobs:
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
           $bin = Get-ChildItem "source\Engine\bin" -File |
-            Where-Object {
-              $_.Name -like "*.windows.editor.arm64*.exe" -and
-              $_.Name -notlike "*.console.*"
-            } |
+            Where-Object { $_.Name -like "*.windows.editor.arm64.exe" } |
+            Select-Object -First 1
+          $console = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object { $_.Name -like "*.windows.editor.arm64.console.exe" } |
             Select-Object -First 1
 
           if (-not $bin) { throw "Windows ARM64 editor binary not found." }
+          if (-not $console) { throw "Windows ARM64 console wrapper not found." }
 
           Copy-Item $bin.FullName "$out\JinguEngine.exe"
-          $hash = (Get-FileHash "$out\JinguEngine.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  JinguEngine.exe" | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
+          Copy-Item $console.FullName "$out\JinguEngine.console.exe"
+          Copy-Item "source\Engine\LICENSE.txt" "$out\LICENSE.txt"
+          Copy-Item "source\Engine\JINGU_LICENSE.txt" "$out\JINGU_LICENSE.txt"
+          Copy-Item "source\Engine\COPYRIGHT.txt" "$out\COPYRIGHT.txt"
+          Copy-Item "source\Engine\JINGU_NOTICE.txt" "$out\JINGU_NOTICE.txt"
+          Copy-Item "source\Engine\JINGU_README.md" "$out\README.md"
 
           @"
           Jingu Engine ${{ inputs.version }}
@@ -228,7 +238,17 @@ jobs:
           Source ZIP: $env:SOURCE_ZIP
           Source SHA-256: $env:SOURCE_SHA256
           Workflow commit: $env:GITHUB_SHA
+          Runtime validation: not physically tested by maintainer for v1.0.0.
           "@ | Set-Content "$out\BUILD_INFO.txt" -Encoding utf8
+
+          $lines = Get-ChildItem $out -File |
+            Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
 
       - name: Upload Windows ARM64 editor
         uses: actions/upload-artifact@v4
@@ -242,14 +262,13 @@ jobs:
     name: Linux x64 - Editor
     runs-on: ubuntu-22.04
     timeout-minutes: 240
-
     steps:
       - name: Checkout build repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Verify C79 source ZIP
+      - name: Verify C80 source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -269,7 +288,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y             build-essential python3 python3-pip pkg-config             libx11-dev libxcursor-dev libxinerama-dev             libgl1-mesa-dev libglu1-mesa-dev             libasound2-dev libpulse-dev libudev-dev             libxi-dev libxrandr-dev libwayland-dev libwayland-bin
+          sudo apt-get install -y \
+            build-essential python3 python3-pip pkg-config \
+            libx11-dev libxcursor-dev libxinerama-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev \
+            libxi-dev libxrandr-dev libwayland-dev libwayland-bin
           python3 -m pip install --user "scons==4.10.1"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -278,7 +302,17 @@ jobs:
         run: |
           set -euo pipefail
           cd source/Engine
-          scons             platform=linuxbsd             target=editor             arch=x86_64             production=yes             lto=${{ inputs.lto }}             debug_symbols=no             tests=no             dev_build=no             accesskit=no             -j4 2>&1 | tee ../../build-linux-x64.log
+          scons \
+            platform=linuxbsd \
+            target=editor \
+            arch=x86_64 \
+            production=yes \
+            lto=${{ inputs.lto }} \
+            debug_symbols=no \
+            tests=no \
+            dev_build=no \
+            accesskit=no \
+            -j4 2>&1 | tee ../../build-linux-x64.log
 
       - name: Upload Linux x64 build log
         if: always()
@@ -299,7 +333,11 @@ jobs:
           test -n "$BIN"
           cp "$BIN" "$OUT/JinguEngine"
           chmod +x "$OUT/JinguEngine"
-          sha256sum "$OUT/JinguEngine" > "$OUT/SHA256SUMS.txt"
+          cp source/Engine/LICENSE.txt "$OUT/LICENSE.txt"
+          cp source/Engine/JINGU_LICENSE.txt "$OUT/JINGU_LICENSE.txt"
+          cp source/Engine/COPYRIGHT.txt "$OUT/COPYRIGHT.txt"
+          cp source/Engine/JINGU_NOTICE.txt "$OUT/JINGU_NOTICE.txt"
+          cp source/Engine/JINGU_README.md "$OUT/README.md"
           {
             echo "Jingu Engine ${{ inputs.version }}"
             echo "Target: editor"
@@ -310,7 +348,9 @@ jobs:
             echo "Source ZIP: ${SOURCE_ZIP}"
             echo "Source SHA-256: ${SOURCE_SHA256}"
             echo "Workflow commit: $GITHUB_SHA"
+            echo "Runtime validation: not physically tested by maintainer for v1.0.0."
           } > "$OUT/BUILD_INFO.txt"
+          (cd "$OUT" && sha256sum JinguEngine BUILD_INFO.txt COPYRIGHT.txt JINGU_LICENSE.txt JINGU_NOTICE.txt LICENSE.txt README.md > SHA256SUMS.txt)
 
       - name: Upload Linux x64 editor
         uses: actions/upload-artifact@v4
@@ -324,14 +364,13 @@ jobs:
     name: Linux ARM64 - Editor
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 240
-
     steps:
       - name: Checkout build repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Verify C79 source ZIP
+      - name: Verify C80 source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -351,7 +390,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y             build-essential python3 python3-pip pkg-config             libx11-dev libxcursor-dev libxinerama-dev             libgl1-mesa-dev libglu1-mesa-dev             libasound2-dev libpulse-dev libudev-dev             libxi-dev libxrandr-dev libwayland-dev libwayland-bin
+          sudo apt-get install -y \
+            build-essential python3 python3-pip pkg-config \
+            libx11-dev libxcursor-dev libxinerama-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev \
+            libxi-dev libxrandr-dev libwayland-dev libwayland-bin
           python3 -m pip install --user "scons==4.10.1"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -360,7 +404,17 @@ jobs:
         run: |
           set -euo pipefail
           cd source/Engine
-          scons             platform=linuxbsd             target=editor             arch=arm64             production=yes             lto=${{ inputs.lto }}             debug_symbols=no             tests=no             dev_build=no             accesskit=no             -j4 2>&1 | tee ../../build-linux-arm64.log
+          scons \
+            platform=linuxbsd \
+            target=editor \
+            arch=arm64 \
+            production=yes \
+            lto=${{ inputs.lto }} \
+            debug_symbols=no \
+            tests=no \
+            dev_build=no \
+            accesskit=no \
+            -j4 2>&1 | tee ../../build-linux-arm64.log
 
       - name: Upload Linux ARM64 build log
         if: always()
@@ -381,7 +435,11 @@ jobs:
           test -n "$BIN"
           cp "$BIN" "$OUT/JinguEngine"
           chmod +x "$OUT/JinguEngine"
-          sha256sum "$OUT/JinguEngine" > "$OUT/SHA256SUMS.txt"
+          cp source/Engine/LICENSE.txt "$OUT/LICENSE.txt"
+          cp source/Engine/JINGU_LICENSE.txt "$OUT/JINGU_LICENSE.txt"
+          cp source/Engine/COPYRIGHT.txt "$OUT/COPYRIGHT.txt"
+          cp source/Engine/JINGU_NOTICE.txt "$OUT/JINGU_NOTICE.txt"
+          cp source/Engine/JINGU_README.md "$OUT/README.md"
           {
             echo "Jingu Engine ${{ inputs.version }}"
             echo "Target: editor"
@@ -392,7 +450,9 @@ jobs:
             echo "Source ZIP: ${SOURCE_ZIP}"
             echo "Source SHA-256: ${SOURCE_SHA256}"
             echo "Workflow commit: $GITHUB_SHA"
+            echo "Runtime validation: not physically tested by maintainer for v1.0.0."
           } > "$OUT/BUILD_INFO.txt"
+          (cd "$OUT" && sha256sum JinguEngine BUILD_INFO.txt COPYRIGHT.txt JINGU_LICENSE.txt JINGU_NOTICE.txt LICENSE.txt README.md > SHA256SUMS.txt)
 
       - name: Upload Linux ARM64 editor
         uses: actions/upload-artifact@v4
