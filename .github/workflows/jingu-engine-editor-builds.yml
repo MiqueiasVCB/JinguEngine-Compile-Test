@@ -20,13 +20,13 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: JINGU_ENGINE_CLEANUP78_SOURCE.zip
-  SOURCE_SHA256: 9ae417e7ec5187521f6fdb5976de9dae9b5247b82062c3c546ab6589edf90845
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP79_SOURCE.zip
+  SOURCE_SHA256: b8296eef580c727db0ba2cd81d7b9f09c5264710b5f73f13c198bb9c1a108059
 
 jobs:
   windows-x64:
     name: Windows x64 - Editor
-    runs-on: ubuntu-22.04
+    runs-on: windows-2022
     timeout-minutes: 240
 
     steps:
@@ -35,86 +35,95 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C78 source ZIP
-        shell: bash
+      - name: Verify C79 source ZIP
+        shell: pwsh
         run: |
-          set -euo pipefail
-          echo "${SOURCE_SHA256}  ${SOURCE_ZIP}" | sha256sum -c -
+          $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SOURCE_SHA256) {
+            throw "Source ZIP SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual"
+          }
+          Write-Host "Source ZIP SHA-256 OK."
 
       - name: Extract source
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          rm -rf source
-          mkdir -p source
-          unzip -q "${SOURCE_ZIP}" -d source
-          test -f source/Engine/SConstruct
-          echo "Engine source extracted successfully."
+          Remove-Item "source" -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "source" | Out-Null
+          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath "source" -Force
+          if (-not (Test-Path "source\Engine\SConstruct")) {
+            throw "Engine/SConstruct was not found after extraction."
+          }
 
-      - name: Install Windows x64 build dependencies
-        shell: bash
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SCons
+        shell: pwsh
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y mingw-w64 python3 python3-pip
-          python3 -m pip install --user "scons==4.10.1"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
-          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          python -m pip install "scons==4.10.1"
+          scons --version
 
       - name: Compile Jingu Editor - Windows x64
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cd source/Engine
+          Set-Location "source\Engine"
+          scons `
+            platform=windows `
+            target=editor `
+            arch=x86_64 `
+            production=yes `
+            lto=${{ inputs.lto }} `
+            debug_symbols=no `
+            tests=no `
+            dev_build=no `
+            d3d12=no `
+            accesskit=no `
+            angle=no `
+            -j4 2>&1 | Tee-Object -FilePath "..\..\build-windows-x64.log"
 
-          scons \
-            platform=windows \
-            target=editor \
-            arch=x86_64 \
-            production=yes \
-            use_mingw=yes \
-            lto=${{ inputs.lto }} \
-            debug_symbols=no \
-            tests=no \
-            dev_build=no \
-            d3d12=no \
-            accesskit=no \
-            angle=no \
-            -j4 2>&1 | tee ../../build-windows-x64.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows x64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ inputs.version }}-Windows-x64-build-log
+          path: build-windows-x64.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package Windows x64 editor
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $out = "dist\JinguEngine-${{ inputs.version }}-Windows-x64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          OUT="dist/JinguEngine-${{ inputs.version }}-Windows-x64"
-          mkdir -p "$OUT"
+          $bin = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object {
+              $_.Name -like "*.windows.editor.x86_64*.exe" -and
+              $_.Name -notlike "*.console.*"
+            } |
+            Select-Object -First 1
 
-          BIN="$(find source/Engine/bin -maxdepth 1 -type f \
-            -name '*.windows.editor.x86_64.exe' \
-            ! -name '*.console.*' | head -n 1)"
+          if (-not $bin) { throw "Windows x64 editor binary not found." }
 
-          if [ -z "$BIN" ]; then
-            echo "Windows x64 editor binary not found."
-            exit 1
-          fi
+          Copy-Item $bin.FullName "$out\JinguEngine.exe"
+          $hash = (Get-FileHash "$out\JinguEngine.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  JinguEngine.exe" | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
 
-          cp "$BIN" "$OUT/JinguEngine.exe"
-          sha256sum "$OUT/JinguEngine.exe" > "$OUT/SHA256SUMS.txt"
-
-          {
-            echo "Jingu Engine ${{ inputs.version }}"
-            echo "Target: editor"
-            echo "Platform: Windows"
-            echo "Architecture: x64"
-            echo "Toolchain: MinGW-w64 GCC"
-            echo "LTO: ${{ inputs.lto }}"
-            echo "Source ZIP: ${SOURCE_ZIP}"
-            echo "Source SHA-256: ${SOURCE_SHA256}"
-            echo "Workflow commit: ${GITHUB_SHA}"
-          } > "$OUT/BUILD_INFO.txt"
+          @"
+          Jingu Engine ${{ inputs.version }}
+          Target: editor
+          Platform: Windows
+          Architecture: x64
+          Toolchain: MSVC
+          LTO: ${{ inputs.lto }}
+          Source ZIP: $env:SOURCE_ZIP
+          Source SHA-256: $env:SOURCE_SHA256
+          Workflow commit: $env:GITHUB_SHA
+          "@ | Set-Content "$out\BUILD_INFO.txt" -Encoding utf8
 
       - name: Upload Windows x64 editor
         uses: actions/upload-artifact@v4
@@ -135,7 +144,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C78 source ZIP
+      - name: Verify C79 source ZIP
         shell: pwsh
         run: |
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
@@ -150,7 +159,6 @@ jobs:
           Remove-Item "source" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path "source" | Out-Null
           Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath "source" -Force
-
           if (-not (Test-Path "source\Engine\SConstruct")) {
             throw "Engine/SConstruct was not found after extraction."
           }
@@ -166,7 +174,6 @@ jobs:
         shell: pwsh
         run: |
           Set-Location "source\Engine"
-
           scons `
             platform=windows `
             target=editor `
@@ -181,9 +188,16 @@ jobs:
             angle=no `
             -j4 2>&1 | Tee-Object -FilePath "..\..\build-windows-arm64.log"
 
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows ARM64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ inputs.version }}-Windows-arm64-build-log
+          path: build-windows-arm64.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package Windows ARM64 editor
         shell: pwsh
@@ -198,12 +212,9 @@ jobs:
             } |
             Select-Object -First 1
 
-          if (-not $bin) {
-            throw "Windows ARM64 editor binary not found."
-          }
+          if (-not $bin) { throw "Windows ARM64 editor binary not found." }
 
           Copy-Item $bin.FullName "$out\JinguEngine.exe"
-
           $hash = (Get-FileHash "$out\JinguEngine.exe" -Algorithm SHA256).Hash.ToLower()
           "$hash  JinguEngine.exe" | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
 
@@ -238,7 +249,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C78 source ZIP
+      - name: Verify C79 source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -258,24 +269,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            python3 \
-            python3-pip \
-            pkg-config \
-            libx11-dev \
-            libxcursor-dev \
-            libxinerama-dev \
-            libgl1-mesa-dev \
-            libglu1-mesa-dev \
-            libasound2-dev \
-            libpulse-dev \
-            libudev-dev \
-            libxi-dev \
-            libxrandr-dev \
-            libwayland-dev \
-            libwayland-bin
-
+          sudo apt-get install -y             build-essential python3 python3-pip pkg-config             libx11-dev libxcursor-dev libxinerama-dev             libgl1-mesa-dev libglu1-mesa-dev             libasound2-dev libpulse-dev libudev-dev             libxi-dev libxrandr-dev libwayland-dev libwayland-bin
           python3 -m pip install --user "scons==4.10.1"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -284,39 +278,28 @@ jobs:
         run: |
           set -euo pipefail
           cd source/Engine
+          scons             platform=linuxbsd             target=editor             arch=x86_64             production=yes             lto=${{ inputs.lto }}             debug_symbols=no             tests=no             dev_build=no             accesskit=no             -j4 2>&1 | tee ../../build-linux-x64.log
 
-          scons \
-            platform=linuxbsd \
-            target=editor \
-            arch=x86_64 \
-            production=yes \
-            lto=${{ inputs.lto }} \
-            debug_symbols=no \
-            tests=no \
-            dev_build=no \
-            accesskit=no \
-            -j4 2>&1 | tee ../../build-linux-x64.log
+      - name: Upload Linux x64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ inputs.version }}-Linux-x64-build-log
+          path: build-linux-x64.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package Linux x64 editor
         shell: bash
         run: |
           set -euo pipefail
-
           OUT="dist/JinguEngine-${{ inputs.version }}-Linux-x64"
           mkdir -p "$OUT"
-
-          BIN="$(find source/Engine/bin -maxdepth 1 -type f \
-            -name '*.linuxbsd.editor.x86_64*' | head -n 1)"
-
-          if [ -z "$BIN" ]; then
-            echo "Linux x64 editor binary not found."
-            exit 1
-          fi
-
+          BIN="$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.editor.x86_64*' | head -n 1)"
+          test -n "$BIN"
           cp "$BIN" "$OUT/JinguEngine"
           chmod +x "$OUT/JinguEngine"
           sha256sum "$OUT/JinguEngine" > "$OUT/SHA256SUMS.txt"
-
           {
             echo "Jingu Engine ${{ inputs.version }}"
             echo "Target: editor"
@@ -326,7 +309,7 @@ jobs:
             echo "LTO: ${{ inputs.lto }}"
             echo "Source ZIP: ${SOURCE_ZIP}"
             echo "Source SHA-256: ${SOURCE_SHA256}"
-            echo "Workflow commit: ${GITHUB_SHA}"
+            echo "Workflow commit: $GITHUB_SHA"
           } > "$OUT/BUILD_INFO.txt"
 
       - name: Upload Linux x64 editor
@@ -348,7 +331,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C78 source ZIP
+      - name: Verify C79 source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -368,24 +351,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            python3 \
-            python3-pip \
-            pkg-config \
-            libx11-dev \
-            libxcursor-dev \
-            libxinerama-dev \
-            libgl1-mesa-dev \
-            libglu1-mesa-dev \
-            libasound2-dev \
-            libpulse-dev \
-            libudev-dev \
-            libxi-dev \
-            libxrandr-dev \
-            libwayland-dev \
-            libwayland-bin
-
+          sudo apt-get install -y             build-essential python3 python3-pip pkg-config             libx11-dev libxcursor-dev libxinerama-dev             libgl1-mesa-dev libglu1-mesa-dev             libasound2-dev libpulse-dev libudev-dev             libxi-dev libxrandr-dev libwayland-dev libwayland-bin
           python3 -m pip install --user "scons==4.10.1"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -394,39 +360,28 @@ jobs:
         run: |
           set -euo pipefail
           cd source/Engine
+          scons             platform=linuxbsd             target=editor             arch=arm64             production=yes             lto=${{ inputs.lto }}             debug_symbols=no             tests=no             dev_build=no             accesskit=no             -j4 2>&1 | tee ../../build-linux-arm64.log
 
-          scons \
-            platform=linuxbsd \
-            target=editor \
-            arch=arm64 \
-            production=yes \
-            lto=${{ inputs.lto }} \
-            debug_symbols=no \
-            tests=no \
-            dev_build=no \
-            accesskit=no \
-            -j4 2>&1 | tee ../../build-linux-arm64.log
+      - name: Upload Linux ARM64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ inputs.version }}-Linux-arm64-build-log
+          path: build-linux-arm64.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package Linux ARM64 editor
         shell: bash
         run: |
           set -euo pipefail
-
           OUT="dist/JinguEngine-${{ inputs.version }}-Linux-arm64"
           mkdir -p "$OUT"
-
-          BIN="$(find source/Engine/bin -maxdepth 1 -type f \
-            -name '*.linuxbsd.editor.arm64*' | head -n 1)"
-
-          if [ -z "$BIN" ]; then
-            echo "Linux ARM64 editor binary not found."
-            exit 1
-          fi
-
+          BIN="$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.editor.arm64*' | head -n 1)"
+          test -n "$BIN"
           cp "$BIN" "$OUT/JinguEngine"
           chmod +x "$OUT/JinguEngine"
           sha256sum "$OUT/JinguEngine" > "$OUT/SHA256SUMS.txt"
-
           {
             echo "Jingu Engine ${{ inputs.version }}"
             echo "Target: editor"
@@ -436,7 +391,7 @@ jobs:
             echo "LTO: ${{ inputs.lto }}"
             echo "Source ZIP: ${SOURCE_ZIP}"
             echo "Source SHA-256: ${SOURCE_SHA256}"
-            echo "Workflow commit: ${GITHUB_SHA}"
+            echo "Workflow commit: $GITHUB_SHA"
           } > "$OUT/BUILD_INFO.txt"
 
       - name: Upload Linux ARM64 editor
