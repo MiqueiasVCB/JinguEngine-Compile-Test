@@ -1,0 +1,307 @@
+name: Jingu Engine - Export Templates
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha256:
+        description: "SHA-256 from the reviewed CLEANUP85 delivery"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP85_SOURCE.zip
+  SOURCE_SHA256: ${{ inputs.source_sha256 }}
+
+jobs:
+  windows-x64:
+    name: Windows x64 templates
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and extract source
+        shell: pwsh
+        run: |
+          $actual=(Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SOURCE_SHA256) { throw "Source ZIP SHA-256 mismatch" }
+          New-Item -ItemType Directory -Force source | Out-Null
+          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath source -Force
+      - name: Install SCons
+        shell: pwsh
+        run: python -m pip install "scons==4.10.1"
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Build debug and release
+        shell: pwsh
+        run: |
+          Set-Location source\Engine
+          scons platform=windows target=template_debug arch=x86_64 production=yes lto=none debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          scons platform=windows target=template_release arch=x86_64 production=yes lto=full debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Normalize template names
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $b="source\Engine\bin"
+          $d=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.x86_64.exe" } | Select -First 1
+          $dc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.x86_64.console.exe" } | Select -First 1
+          $r=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.x86_64.exe" } | Select -First 1
+          $rc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.x86_64.console.exe" } | Select -First 1
+          if (-not $d -or -not $dc -or -not $r -or -not $rc) { throw "Windows x64 template output incomplete" }
+          Copy-Item $d.FullName out\windows_debug_x86_64.exe
+          Copy-Item $dc.FullName out\windows_debug_x86_64_console.exe
+          Copy-Item $r.FullName out\windows_release_x86_64.exe
+          Copy-Item $rc.FullName out\windows_release_x86_64_console.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-windows-x64
+          path: out/
+          if-no-files-found: error
+
+  windows-arm64:
+    name: Windows ARM64 templates
+    runs-on: windows-11-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and extract source
+        shell: pwsh
+        run: |
+          $actual=(Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SOURCE_SHA256) { throw "Source ZIP SHA-256 mismatch" }
+          New-Item -ItemType Directory -Force source | Out-Null
+          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath source -Force
+      - name: Install SCons
+        shell: pwsh
+        run: python -m pip install "scons==4.10.1"
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Build debug and release
+        shell: pwsh
+        run: |
+          Set-Location source\Engine
+          scons platform=windows target=template_debug arch=arm64 production=yes lto=none debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          scons platform=windows target=template_release arch=arm64 production=yes lto=full debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Normalize template names
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $b="source\Engine\bin"
+          $d=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.arm64.exe" } | Select -First 1
+          $dc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.arm64.console.exe" } | Select -First 1
+          $r=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.arm64.exe" } | Select -First 1
+          $rc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.arm64.console.exe" } | Select -First 1
+          if (-not $d -or -not $dc -or -not $r -or -not $rc) { throw "Windows ARM64 template output incomplete" }
+          Copy-Item $d.FullName out\windows_debug_arm64.exe
+          Copy-Item $dc.FullName out\windows_debug_arm64_console.exe
+          Copy-Item $r.FullName out\windows_release_arm64.exe
+          Copy-Item $rc.FullName out\windows_release_arm64_console.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-windows-arm64
+          path: out/
+          if-no-files-found: error
+
+  linux-x64:
+    name: Linux x64 templates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          mkdir -p source && unzip -q "$SOURCE_ZIP" -d source
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 python3-pip pkg-config libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev libwayland-dev libwayland-bin
+          python3 -m pip install --user "scons==4.10.1"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Build debug and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          scons platform=linuxbsd target=template_debug arch=x86_64 production=yes lto=none debug_symbols=no tests=no dev_build=no accesskit=no -j4
+          scons platform=linuxbsd target=template_release arch=x86_64 production=yes lto=full debug_symbols=no tests=no dev_build=no accesskit=no -j4
+      - name: Normalize template names
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          D=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_debug.x86_64*' | head -n1)
+          R=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_release.x86_64*' | head -n1)
+          test -n "$D" && test -n "$R"
+          cp "$D" out/linux_debug.x86_64
+          cp "$R" out/linux_release.x86_64
+          chmod +x out/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-linux-x64
+          path: out/
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux ARM64 templates
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          mkdir -p source && unzip -q "$SOURCE_ZIP" -d source
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 python3-pip pkg-config libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev libwayland-dev libwayland-bin
+          python3 -m pip install --user "scons==4.10.1"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Build debug and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          scons platform=linuxbsd target=template_debug arch=arm64 production=yes lto=none debug_symbols=no tests=no dev_build=no accesskit=no -j4
+          scons platform=linuxbsd target=template_release arch=arm64 production=yes lto=full debug_symbols=no tests=no dev_build=no accesskit=no -j4
+      - name: Normalize template names
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          D=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_debug.arm64*' | head -n1)
+          R=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_release.arm64*' | head -n1)
+          test -n "$D" && test -n "$R"
+          cp "$D" out/linux_debug.arm64
+          cp "$R" out/linux_release.arm64
+          chmod +x out/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-linux-arm64
+          path: out/
+          if-no-files-found: error
+
+  package:
+    name: Stage desktop inputs awaiting local UWP finalization
+    runs-on: ubuntu-22.04
+    needs: [windows-x64, windows-arm64, linux-x64, linux-arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and extract matching source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Download Windows x64
+        uses: actions/download-artifact@v4
+        with:
+          name: templates-windows-x64
+          path: collected/windows-x64
+      - name: Download Windows ARM64
+        uses: actions/download-artifact@v4
+        with:
+          name: templates-windows-arm64
+          path: collected/windows-arm64
+      - name: Download Linux x64
+        uses: actions/download-artifact@v4
+        with:
+          name: templates-linux-x64
+          path: collected/linux-x64
+      - name: Download Linux ARM64
+        uses: actions/download-artifact@v4
+        with:
+          name: templates-linux-arm64
+          path: collected/linux-arm64
+      - name: Stage desktop templates for finalization
+        shell: python {0}
+        run: |
+          import os, shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path("source/Engine/misc/uwp").resolve()))
+          from finalize_templates import DESKTOP_FILES, desktop_files
+          out = Path("desktop")
+          out.mkdir()
+          seen = set()
+          for file in Path("collected").rglob("*"):
+              if file.is_file():
+                  if file.name not in DESKTOP_FILES or file.name in seen:
+                      raise RuntimeError("Unexpected or duplicate desktop artifact: " + str(file))
+                  seen.add(file.name)
+                  shutil.copyfile(file, out / file.name)
+          (out / "version.txt").write_text(os.environ["JINGU_COMPATIBILITY"] + "\n", encoding="utf-8")
+          desktop_files(out, os.environ["JINGU_COMPATIBILITY"])
+      - name: Upload intermediate desktop templates (UWP still required)
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Desktop-Templates-Awaiting-UWP
+          path: desktop/
+          if-no-files-found: error
+          retention-days: 14

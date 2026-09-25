@@ -1,0 +1,499 @@
+name: Jingu Engine - Editor Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha256:
+        description: "SHA-256 from the reviewed CLEANUP85 delivery"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP85_SOURCE.zip
+  SOURCE_SHA256: ${{ inputs.source_sha256 }}
+
+jobs:
+  windows-x64:
+    name: Windows x64 - Editor
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify CLEANUP85 source ZIP
+        shell: pwsh
+        run: |
+          $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SOURCE_SHA256) {
+            throw "Source ZIP SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual"
+          }
+
+      - name: Extract source
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "source") { throw "Use a fresh build workspace" }
+          New-Item -ItemType Directory -Path "source" | Out-Null
+          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath "source" -Force
+          if (-not (Test-Path "source\Engine\SConstruct")) { throw "Engine/SConstruct not found." }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SCons
+        shell: pwsh
+        run: |
+          python -m pip install "scons==4.10.1"
+          scons --version
+
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Compile Jingu Editor - Windows x64
+        shell: pwsh
+        run: |
+          Set-Location "source\Engine"
+          scons `
+            platform=windows `
+            target=editor `
+            arch=x86_64 `
+            production=yes `
+            lto=full `
+            debug_symbols=no `
+            tests=no `
+            dev_build=no `
+            d3d12=no `
+            accesskit=no `
+            angle=no `
+            -j4 2>&1 | Tee-Object -FilePath "..\..\build-windows-x64.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows x64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Windows-x64-build-log
+          path: build-windows-x64.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Package Windows x64 editor
+        shell: pwsh
+        run: |
+          $out = "dist\JinguEngine-${{ env.JINGU_VERSION }}-Windows-x64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $bin = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object { $_.Name -like "*.windows.editor.x86_64.exe" } |
+            Select-Object -First 1
+          $console = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object { $_.Name -like "*.windows.editor.x86_64.console.exe" } |
+            Select-Object -First 1
+
+          if (-not $bin) { throw "Windows x64 editor binary not found." }
+          if (-not $console) { throw "Windows x64 console wrapper not found." }
+
+          Copy-Item $bin.FullName "$out\JinguEngine.exe"
+          Copy-Item $console.FullName "$out\JinguEngine.console.exe"
+          Copy-Item "source\Engine\LICENSE.txt" "$out\LICENSE.txt"
+          Copy-Item "source\Engine\JINGU_LICENSE.txt" "$out\JINGU_LICENSE.txt"
+          Copy-Item "source\Engine\COPYRIGHT.txt" "$out\COPYRIGHT.txt"
+          Copy-Item "source\Engine\JINGU_NOTICE.txt" "$out\JINGU_NOTICE.txt"
+          Copy-Item "source\Engine\JINGU_README.md" "$out\README.md"
+
+          @"
+          Jingu Engine ${{ env.JINGU_VERSION }}
+          Target: editor
+          Platform: Windows
+          Architecture: x64
+          Toolchain: MSVC
+          LTO: full
+          Source ZIP: $env:SOURCE_ZIP
+          Source SHA-256: $env:SOURCE_SHA256
+          Workflow commit: $env:GITHUB_SHA
+          Runtime validation: Windows x64 requires maintainer smoke after artifact download.
+          "@ | Set-Content "$out\BUILD_INFO.txt" -Encoding utf8
+
+          $lines = Get-ChildItem $out -File |
+            Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
+
+      - name: Upload Windows x64 editor
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Windows-x64
+          path: dist/JinguEngine-${{ env.JINGU_VERSION }}-Windows-x64/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-arm64:
+    name: Windows ARM64 - Editor
+    runs-on: windows-11-arm
+    timeout-minutes: 240
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify CLEANUP85 source ZIP
+        shell: pwsh
+        run: |
+          $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SOURCE_SHA256) {
+            throw "Source ZIP SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual"
+          }
+
+      - name: Extract source
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "source") { throw "Use a fresh build workspace" }
+          New-Item -ItemType Directory -Path "source" | Out-Null
+          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath "source" -Force
+          if (-not (Test-Path "source\Engine\SConstruct")) { throw "Engine/SConstruct not found." }
+
+      - name: Install SCons
+        shell: pwsh
+        run: |
+          python --version
+          python -m pip install "scons==4.10.1"
+          scons --version
+
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Compile Jingu Editor - Windows ARM64
+        shell: pwsh
+        run: |
+          Set-Location "source\Engine"
+          scons `
+            platform=windows `
+            target=editor `
+            arch=arm64 `
+            production=yes `
+            lto=full `
+            debug_symbols=no `
+            tests=no `
+            dev_build=no `
+            d3d12=no `
+            accesskit=no `
+            angle=no `
+            -j4 2>&1 | Tee-Object -FilePath "..\..\build-windows-arm64.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows ARM64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Windows-arm64-build-log
+          path: build-windows-arm64.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Package Windows ARM64 editor
+        shell: pwsh
+        run: |
+          $out = "dist\JinguEngine-${{ env.JINGU_VERSION }}-Windows-arm64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $bin = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object { $_.Name -like "*.windows.editor.arm64.exe" } |
+            Select-Object -First 1
+          $console = Get-ChildItem "source\Engine\bin" -File |
+            Where-Object { $_.Name -like "*.windows.editor.arm64.console.exe" } |
+            Select-Object -First 1
+
+          if (-not $bin) { throw "Windows ARM64 editor binary not found." }
+          if (-not $console) { throw "Windows ARM64 console wrapper not found." }
+
+          Copy-Item $bin.FullName "$out\JinguEngine.exe"
+          Copy-Item $console.FullName "$out\JinguEngine.console.exe"
+          Copy-Item "source\Engine\LICENSE.txt" "$out\LICENSE.txt"
+          Copy-Item "source\Engine\JINGU_LICENSE.txt" "$out\JINGU_LICENSE.txt"
+          Copy-Item "source\Engine\COPYRIGHT.txt" "$out\COPYRIGHT.txt"
+          Copy-Item "source\Engine\JINGU_NOTICE.txt" "$out\JINGU_NOTICE.txt"
+          Copy-Item "source\Engine\JINGU_README.md" "$out\README.md"
+
+          @"
+          Jingu Engine ${{ env.JINGU_VERSION }}
+          Target: editor
+          Platform: Windows
+          Architecture: ARM64
+          Toolchain: MSVC
+          LTO: full
+          Source ZIP: $env:SOURCE_ZIP
+          Source SHA-256: $env:SOURCE_SHA256
+          Workflow commit: $env:GITHUB_SHA
+          Runtime validation: not physically tested by maintainer for this release.
+          "@ | Set-Content "$out\BUILD_INFO.txt" -Encoding utf8
+
+          $lines = Get-ChildItem $out -File |
+            Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
+
+      - name: Upload Windows ARM64 editor
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Windows-arm64
+          path: dist/JinguEngine-${{ env.JINGU_VERSION }}-Windows-arm64/
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-x64:
+    name: Linux x64 - Editor
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify CLEANUP85 source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${SOURCE_SHA256}  ${SOURCE_ZIP}" | sha256sum -c -
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf source
+          mkdir -p source
+          unzip -q "${SOURCE_ZIP}" -d source
+          test -f source/Engine/SConstruct
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential python3 python3-pip pkg-config \
+            libx11-dev libxcursor-dev libxinerama-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev \
+            libxi-dev libxrandr-dev libwayland-dev libwayland-bin
+          python3 -m pip install --user "scons==4.10.1"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Compile Jingu Editor - Linux x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          scons \
+            platform=linuxbsd \
+            target=editor \
+            arch=x86_64 \
+            production=yes \
+            lto=full \
+            debug_symbols=no \
+            tests=no \
+            dev_build=no \
+            accesskit=no \
+            -j4 2>&1 | tee ../../build-linux-x64.log
+
+      - name: Upload Linux x64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Linux-x64-build-log
+          path: build-linux-x64.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Package Linux x64 editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="dist/JinguEngine-${{ env.JINGU_VERSION }}-Linux-x64"
+          mkdir -p "$OUT"
+          BIN="$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.editor.x86_64*' | head -n 1)"
+          test -n "$BIN"
+          cp "$BIN" "$OUT/JinguEngine"
+          chmod +x "$OUT/JinguEngine"
+          cp source/Engine/LICENSE.txt "$OUT/LICENSE.txt"
+          cp source/Engine/JINGU_LICENSE.txt "$OUT/JINGU_LICENSE.txt"
+          cp source/Engine/COPYRIGHT.txt "$OUT/COPYRIGHT.txt"
+          cp source/Engine/JINGU_NOTICE.txt "$OUT/JINGU_NOTICE.txt"
+          cp source/Engine/JINGU_README.md "$OUT/README.md"
+          {
+            echo "Jingu Engine ${{ env.JINGU_VERSION }}"
+            echo "Target: editor"
+            echo "Platform: Linux"
+            echo "Architecture: x64"
+            echo "Build OS: Ubuntu 22.04"
+            echo "LTO: full"
+            echo "Source ZIP: ${SOURCE_ZIP}"
+            echo "Source SHA-256: ${SOURCE_SHA256}"
+            echo "Workflow commit: $GITHUB_SHA"
+            echo "Runtime validation: not physically tested by maintainer for this release."
+          } > "$OUT/BUILD_INFO.txt"
+          (cd "$OUT" && sha256sum JinguEngine BUILD_INFO.txt COPYRIGHT.txt JINGU_LICENSE.txt JINGU_NOTICE.txt LICENSE.txt README.md > SHA256SUMS.txt)
+
+      - name: Upload Linux x64 editor
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Linux-x64
+          path: dist/JinguEngine-${{ env.JINGU_VERSION }}-Linux-x64/
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-arm64:
+    name: Linux ARM64 - Editor
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 240
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify CLEANUP85 source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${SOURCE_SHA256}  ${SOURCE_ZIP}" | sha256sum -c -
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf source
+          mkdir -p source
+          unzip -q "${SOURCE_ZIP}" -d source
+          test -f source/Engine/SConstruct
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential python3 python3-pip pkg-config \
+            libx11-dev libxcursor-dev libxinerama-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev \
+            libxi-dev libxrandr-dev libwayland-dev libwayland-bin
+          python3 -m pip install --user "scons==4.10.1"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Derive Jingu release metadata
+        shell: python {0}
+        run: |
+          import os, sys
+          from pathlib import Path
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from package_templates import jingu_release_version, jingu_version
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
+              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+      - name: Compile Jingu Editor - Linux ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          scons \
+            platform=linuxbsd \
+            target=editor \
+            arch=arm64 \
+            production=yes \
+            lto=full \
+            debug_symbols=no \
+            tests=no \
+            dev_build=no \
+            accesskit=no \
+            -j4 2>&1 | tee ../../build-linux-arm64.log
+
+      - name: Upload Linux ARM64 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Linux-arm64-build-log
+          path: build-linux-arm64.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Package Linux ARM64 editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="dist/JinguEngine-${{ env.JINGU_VERSION }}-Linux-arm64"
+          mkdir -p "$OUT"
+          BIN="$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.editor.arm64*' | head -n 1)"
+          test -n "$BIN"
+          cp "$BIN" "$OUT/JinguEngine"
+          chmod +x "$OUT/JinguEngine"
+          cp source/Engine/LICENSE.txt "$OUT/LICENSE.txt"
+          cp source/Engine/JINGU_LICENSE.txt "$OUT/JINGU_LICENSE.txt"
+          cp source/Engine/COPYRIGHT.txt "$OUT/COPYRIGHT.txt"
+          cp source/Engine/JINGU_NOTICE.txt "$OUT/JINGU_NOTICE.txt"
+          cp source/Engine/JINGU_README.md "$OUT/README.md"
+          {
+            echo "Jingu Engine ${{ env.JINGU_VERSION }}"
+            echo "Target: editor"
+            echo "Platform: Linux"
+            echo "Architecture: ARM64"
+            echo "Build OS: Ubuntu 22.04 ARM64"
+            echo "LTO: full"
+            echo "Source ZIP: ${SOURCE_ZIP}"
+            echo "Source SHA-256: ${SOURCE_SHA256}"
+            echo "Workflow commit: $GITHUB_SHA"
+            echo "Runtime validation: not physically tested by maintainer for this release."
+          } > "$OUT/BUILD_INFO.txt"
+          (cd "$OUT" && sha256sum JinguEngine BUILD_INFO.txt COPYRIGHT.txt JINGU_LICENSE.txt JINGU_NOTICE.txt LICENSE.txt README.md > SHA256SUMS.txt)
+
+      - name: Upload Linux ARM64 editor
+        uses: actions/upload-artifact@v4
+        with:
+          name: JinguEngine-${{ env.JINGU_VERSION }}-Linux-arm64
+          path: dist/JinguEngine-${{ env.JINGU_VERSION }}-Linux-arm64/
+          if-no-files-found: error
+          retention-days: 14
