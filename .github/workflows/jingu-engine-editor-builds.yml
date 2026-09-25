@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: JINGU_ENGINE_CLEANUP80_SOURCE.zip
-  SOURCE_SHA256: e7c2ce9a0486d3d73288eba12ee56be3eff8f2462933ebd32fa8dd1a78c36942
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP83_SOURCE.zip
+  SOURCE_SHA256: c113f4ef20d9860bc767ef10bc5788a9c8574ad9b8f59fab44f643869b5c1dbe
 
 jobs:
   windows-x64:
@@ -34,7 +34,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C80 source ZIP
+      - name: Verify C82 source ZIP
         shell: pwsh
         run: |
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
@@ -153,7 +153,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C80 source ZIP
+      - name: Verify C82 source ZIP
         shell: pwsh
         run: |
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
@@ -238,7 +238,7 @@ jobs:
           Source ZIP: $env:SOURCE_ZIP
           Source SHA-256: $env:SOURCE_SHA256
           Workflow commit: $env:GITHUB_SHA
-          Runtime validation: not physically tested by maintainer for v1.0.0.
+          Runtime validation: not physically tested by maintainer for this release.
           "@ | Set-Content "$out\BUILD_INFO.txt" -Encoding utf8
 
           $lines = Get-ChildItem $out -File |
@@ -268,7 +268,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C80 source ZIP
+      - name: Verify C82 source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -348,7 +348,7 @@ jobs:
             echo "Source ZIP: ${SOURCE_ZIP}"
             echo "Source SHA-256: ${SOURCE_SHA256}"
             echo "Workflow commit: $GITHUB_SHA"
-            echo "Runtime validation: not physically tested by maintainer for v1.0.0."
+            echo "Runtime validation: not physically tested by maintainer for this release."
           } > "$OUT/BUILD_INFO.txt"
           (cd "$OUT" && sha256sum JinguEngine BUILD_INFO.txt COPYRIGHT.txt JINGU_LICENSE.txt JINGU_NOTICE.txt LICENSE.txt README.md > SHA256SUMS.txt)
 
@@ -370,7 +370,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify C80 source ZIP
+      - name: Verify C82 source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -450,7 +450,7 @@ jobs:
             echo "Source ZIP: ${SOURCE_ZIP}"
             echo "Source SHA-256: ${SOURCE_SHA256}"
             echo "Workflow commit: $GITHUB_SHA"
-            echo "Runtime validation: not physically tested by maintainer for v1.0.0."
+            echo "Runtime validation: not physically tested by maintainer for this release."
           } > "$OUT/BUILD_INFO.txt"
           (cd "$OUT" && sha256sum JinguEngine BUILD_INFO.txt COPYRIGHT.txt JINGU_LICENSE.txt JINGU_NOTICE.txt LICENSE.txt README.md > SHA256SUMS.txt)
 
