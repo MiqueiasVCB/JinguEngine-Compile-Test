@@ -1,10 +1,14 @@
-name: Jingu Engine - Export Templates
+name: Jingu Engine - Complete Export Templates
 
 on:
   workflow_dispatch:
     inputs:
       source_sha256:
-        description: "SHA-256 from the reviewed CLEANUP86 delivery"
+        description: "SHA-256 from the reviewed CLEANUP87 source ZIP"
+        required: true
+        type: string
+      uwp_sha256:
+        description: "SHA-256 of JinguEngine_v1.0.0_uwp_templates_x86_64.zip"
         required: true
         type: string
 
@@ -12,14 +16,62 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: JINGU_ENGINE_CLEANUP86_SOURCE.zip
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP87_SOURCE.zip
+  UWP_ZIP: JinguEngine_v1.0.0_uwp_templates_x86_64.zip
   SOURCE_SHA256: ${{ inputs.source_sha256 }}
+  UWP_SHA256: ${{ inputs.uwp_sha256 }}
+  SCONS_VERSION: "4.10.1"
 
 jobs:
-  windows-x64:
-    name: Windows x64 templates
-    runs-on: windows-2022
-    timeout-minutes: 300
+  source-gates:
+    name: Reviewed source gates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          mkdir source
+          unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+      - name: Run Jingu source gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          python3 misc/uwp/qa/run_source_gates.py --json "$GITHUB_WORKSPACE/source-gates.json" --log "$GITHUB_WORKSPACE/source-gates.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cleanup87-source-gates
+          path: |
+            source-gates.json
+            source-gates.log
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.arch }} templates
+    needs: source-gates
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_32
+            runner: windows-2022
+            artifact: templates-windows-x86-32
+          - arch: x86_64
+            runner: windows-2022
+            artifact: templates-windows-x64
+          - arch: arm64
+            runner: windows-11-arm
+            artifact: templates-windows-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,225 +83,398 @@ jobs:
           $actual=(Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:SOURCE_SHA256) { throw "Source ZIP SHA-256 mismatch" }
           New-Item -ItemType Directory -Force source | Out-Null
-          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath source -Force
+          Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath source -Force
+          if (-not (Test-Path -LiteralPath "source\Engine\SConstruct")) { throw "Engine/SConstruct not found" }
       - name: Install SCons
         shell: pwsh
-        run: python -m pip install "scons==4.10.1"
-      - name: Derive Jingu release metadata
-        shell: python {0}
-        run: |
-          import os, sys
-          from pathlib import Path
-          root = Path("source/Engine").resolve()
-          sys.path.insert(0, str(root / "misc/uwp"))
-          from package_templates import jingu_release_version, jingu_version
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
-              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
+        run: python -m pip install "scons==$env:SCONS_VERSION"
       - name: Build debug and release
         shell: pwsh
         run: |
           Set-Location source\Engine
-          scons platform=windows target=template_debug arch=x86_64 production=yes lto=none debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
+          scons platform=windows target=template_debug arch=${{ matrix.arch }} production=yes lto=none debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          scons platform=windows target=template_release arch=x86_64 production=yes lto=full debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
+          scons platform=windows target=template_release arch=${{ matrix.arch }} production=yes lto=full debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Normalize template names
+      - name: Normalize and verify outputs
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           $b="source\Engine\bin"
-          $d=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.x86_64.exe" } | Select -First 1
-          $dc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.x86_64.console.exe" } | Select -First 1
-          $r=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.x86_64.exe" } | Select -First 1
-          $rc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.x86_64.console.exe" } | Select -First 1
-          if (-not $d -or -not $dc -or -not $r -or -not $rc) { throw "Windows x64 template output incomplete" }
-          Copy-Item $d.FullName out\windows_debug_x86_64.exe
-          Copy-Item $dc.FullName out\windows_debug_x86_64_console.exe
-          Copy-Item $r.FullName out\windows_release_x86_64.exe
-          Copy-Item $rc.FullName out\windows_release_x86_64_console.exe
+          $arch="${{ matrix.arch }}"
+          $d=Get-ChildItem $b -File | Where-Object { $_.Name -like "*.windows.template_debug.$arch.exe" } | Select-Object -First 1
+          $dc=Get-ChildItem $b -File | Where-Object { $_.Name -like "*.windows.template_debug.$arch.console.exe" } | Select-Object -First 1
+          $r=Get-ChildItem $b -File | Where-Object { $_.Name -like "*.windows.template_release.$arch.exe" } | Select-Object -First 1
+          $rc=Get-ChildItem $b -File | Where-Object { $_.Name -like "*.windows.template_release.$arch.console.exe" } | Select-Object -First 1
+          if (-not $d -or -not $dc -or -not $r -or -not $rc) { throw "Windows $arch template output incomplete" }
+          Copy-Item $d.FullName "out\windows_debug_${arch}.exe"
+          Copy-Item $dc.FullName "out\windows_debug_${arch}_console.exe"
+          Copy-Item $r.FullName "out\windows_release_${arch}.exe"
+          Copy-Item $rc.FullName "out\windows_release_${arch}_console.exe"
+          Get-ChildItem out -File | ForEach-Object { if ($_.Length -le 0) { throw "Empty template: $($_.Name)" } }
       - uses: actions/upload-artifact@v4
         with:
-          name: templates-windows-x64
+          name: ${{ matrix.artifact }}
           path: out/
           if-no-files-found: error
 
-  windows-arm64:
-    name: Windows ARM64 templates
-    runs-on: windows-11-arm
-    timeout-minutes: 300
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify and extract source
-        shell: pwsh
-        run: |
-          $actual=(Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $env:SOURCE_SHA256) { throw "Source ZIP SHA-256 mismatch" }
-          New-Item -ItemType Directory -Force source | Out-Null
-          Expand-Archive -Path $env:SOURCE_ZIP -DestinationPath source -Force
-      - name: Install SCons
-        shell: pwsh
-        run: python -m pip install "scons==4.10.1"
-      - name: Derive Jingu release metadata
-        shell: python {0}
-        run: |
-          import os, sys
-          from pathlib import Path
-          root = Path("source/Engine").resolve()
-          sys.path.insert(0, str(root / "misc/uwp"))
-          from package_templates import jingu_release_version, jingu_version
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
-              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
-      - name: Build debug and release
-        shell: pwsh
-        run: |
-          Set-Location source\Engine
-          scons platform=windows target=template_debug arch=arm64 production=yes lto=none debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          scons platform=windows target=template_release arch=arm64 production=yes lto=full debug_symbols=no tests=no dev_build=no d3d12=no accesskit=no angle=no -j4
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Normalize template names
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force out | Out-Null
-          $b="source\Engine\bin"
-          $d=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.arm64.exe" } | Select -First 1
-          $dc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_debug.arm64.console.exe" } | Select -First 1
-          $r=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.arm64.exe" } | Select -First 1
-          $rc=Get-ChildItem $b -File | ? { $_.Name -like "*.windows.template_release.arm64.console.exe" } | Select -First 1
-          if (-not $d -or -not $dc -or -not $r -or -not $rc) { throw "Windows ARM64 template output incomplete" }
-          Copy-Item $d.FullName out\windows_debug_arm64.exe
-          Copy-Item $dc.FullName out\windows_debug_arm64_console.exe
-          Copy-Item $r.FullName out\windows_release_arm64.exe
-          Copy-Item $rc.FullName out\windows_release_arm64_console.exe
-      - uses: actions/upload-artifact@v4
-        with:
-          name: templates-windows-arm64
-          path: out/
-          if-no-files-found: error
-
-  linux-x64:
-    name: Linux x64 templates
+  linux:
+    name: Linux ${{ matrix.arch }} templates
+    needs: source-gates
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_32
+            sdk: i686-godot-linux-gnu_sdk-buildroot
+            cc: i686-godot-linux-gnu-gcc
+            cxx: i686-godot-linux-gnu-g++
+            artifact: templates-linux-x86-32
+          - arch: x86_64
+            sdk: x86_64-godot-linux-gnu_sdk-buildroot
+            cc: x86_64-godot-linux-gnu-gcc
+            cxx: x86_64-godot-linux-gnu-g++
+            artifact: templates-linux-x64
+          - arch: arm32
+            sdk: arm-godot-linux-gnueabihf_sdk-buildroot
+            cc: arm-godot-linux-gnueabihf-gcc
+            cxx: arm-godot-linux-gnueabihf-g++
+            artifact: templates-linux-arm32
+          - arch: arm64
+            sdk: aarch64-godot-linux-gnu_sdk-buildroot
+            cc: aarch64-godot-linux-gnu-gcc
+            cxx: aarch64-godot-linux-gnu-g++
+            artifact: templates-linux-arm64
+    env:
+      GODOT_SDK_VERSION: godot-2026.05.x-1
     steps:
       - uses: actions/checkout@v4
       - name: Verify and extract source
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
-          mkdir -p source && unzip -q "$SOURCE_ZIP" -d source
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential python3 python3-pip pkg-config libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev libwayland-dev libwayland-bin
-          python3 -m pip install --user "scons==4.10.1"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Derive Jingu release metadata
-        shell: python {0}
-        run: |
-          import os, sys
-          from pathlib import Path
-          root = Path("source/Engine").resolve()
-          sys.path.insert(0, str(root / "misc/uwp"))
-          from package_templates import jingu_release_version, jingu_version
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
-              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
-      - name: Build debug and release
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd source/Engine
-          scons platform=linuxbsd target=template_debug arch=x86_64 production=yes lto=none debug_symbols=no tests=no dev_build=no accesskit=no -j4
-          scons platform=linuxbsd target=template_release arch=x86_64 production=yes lto=full debug_symbols=no tests=no dev_build=no accesskit=no -j4
-      - name: Normalize template names
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          D=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_debug.x86_64*' | head -n1)
-          R=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_release.x86_64*' | head -n1)
-          test -n "$D" && test -n "$R"
-          cp "$D" out/linux_debug.x86_64
-          cp "$R" out/linux_release.x86_64
-          chmod +x out/*
-      - uses: actions/upload-artifact@v4
-        with:
-          name: templates-linux-x64
-          path: out/
-          if-no-files-found: error
-
-  linux-arm64:
-    name: Linux ARM64 templates
-    runs-on: ubuntu-22.04-arm
-    timeout-minutes: 300
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify and extract source
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
-          mkdir -p source && unzip -q "$SOURCE_ZIP" -d source
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential python3 python3-pip pkg-config libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev libwayland-dev libwayland-bin
-          python3 -m pip install --user "scons==4.10.1"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Derive Jingu release metadata
-        shell: python {0}
-        run: |
-          import os, sys
-          from pathlib import Path
-          root = Path("source/Engine").resolve()
-          sys.path.insert(0, str(root / "misc/uwp"))
-          from package_templates import jingu_release_version, jingu_version
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
-              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
-      - name: Build debug and release
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd source/Engine
-          scons platform=linuxbsd target=template_debug arch=arm64 production=yes lto=none debug_symbols=no tests=no dev_build=no accesskit=no -j4
-          scons platform=linuxbsd target=template_release arch=arm64 production=yes lto=full debug_symbols=no tests=no dev_build=no accesskit=no -j4
-      - name: Normalize template names
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          D=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_debug.arm64*' | head -n1)
-          R=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_release.arm64*' | head -n1)
-          test -n "$D" && test -n "$R"
-          cp "$D" out/linux_debug.arm64
-          cp "$R" out/linux_release.arm64
-          chmod +x out/*
-      - uses: actions/upload-artifact@v4
-        with:
-          name: templates-linux-arm64
-          path: out/
-          if-no-files-found: error
-
-  package:
-    name: Stage desktop inputs awaiting local UWP finalization
-    runs-on: ubuntu-22.04
-    needs: [windows-x64, windows-arm64, linux-x64, linux-arm64]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify and extract matching source
         shell: bash
         run: |
           set -euo pipefail
           echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
           mkdir source && unzip -q "$SOURCE_ZIP" -d source
-      - name: Derive Jingu release metadata
+          test -f source/Engine/SConstruct
+      - name: Install host build tools and SCons
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bzip2 curl libwayland-bin python3 python3-pip
+          python3 -m pip install --user "scons==$SCONS_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install official Godot Linux SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK='${{ matrix.sdk }}'
+          URL="https://github.com/godotengine/buildroot/releases/download/$GODOT_SDK_VERSION/$SDK.tar.bz2"
+          curl --fail --location --retry 5 --retry-delay 2 -o "$SDK.tar.bz2" "$URL"
+          tar -xjf "$SDK.tar.bz2"
+          test -x "$SDK/relocate-sdk.sh"
+          (cd "$SDK" && ./relocate-sdk.sh)
+          test -x "$SDK/bin/${{ matrix.cc }}"
+      - name: Build debug and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/${{ matrix.sdk }}/bin:$HOME/.local/bin:$PATH"
+          export CC='${{ matrix.cc }}'
+          export CXX='${{ matrix.cxx }}'
+          cd source/Engine
+          scons platform=linuxbsd target=template_debug arch=${{ matrix.arch }} production=yes lto=none debug_symbols=no tests=no dev_build=no accesskit=no -j4
+          scons platform=linuxbsd target=template_release arch=${{ matrix.arch }} production=yes lto=full debug_symbols=no tests=no dev_build=no accesskit=no -j4
+      - name: Normalize and verify outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir out
+          D=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_debug.${{ matrix.arch }}*' | head -n1)
+          R=$(find source/Engine/bin -maxdepth 1 -type f -name '*.linuxbsd.template_release.${{ matrix.arch }}*' | head -n1)
+          test -n "$D" && test -n "$R" && test -s "$D" && test -s "$R"
+          cp "$D" "out/linux_debug.${{ matrix.arch }}"
+          cp "$R" "out/linux_release.${{ matrix.arch }}"
+          chmod +x out/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/
+          if-no-files-found: error
+
+  android:
+    name: Android templates (4 ABIs)
+    needs: source-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+      - name: Install SCons and Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install "scons==$SCONS_VERSION"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;29.0.14206865"
+      - name: Install Swappy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          python3 misc/scripts/install_swappy_android.py
+      - name: Build all Android native template ABIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          for arch in arm32 arm64 x86_32 x86_64; do
+            scons platform=android target=template_debug arch="$arch" production=yes lto=none debug_symbols=no tests=no dev_build=no swappy=yes -j4
+            scons platform=android target=template_release arch="$arch" production=yes lto=none debug_symbols=no tests=no dev_build=no swappy=yes -j4
+          done
+      - name: Generate APK and Gradle source templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine/platform/android/java
+          ./gradlew --no-daemon generateGodotTemplates
+      - name: Normalize outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir out
+          for f in android_debug.apk android_release.apk android_source.zip; do
+            test -s "source/Engine/bin/$f"
+            cp "source/Engine/bin/$f" "out/$f"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-android
+          path: out/
+          if-no-files-found: error
+
+  web:
+    name: Web templates (all variants)
+    needs: source-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: "4.0.11"
+          no-cache: true
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+          emcc -v
+      - name: Install SCons
+        shell: bash
+        run: python3 -m pip install "scons==$SCONS_VERSION"
+      - name: Build all Web variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          for target in template_debug template_release; do
+            scons platform=web target="$target" arch=wasm32 threads=yes dlink_enabled=no production=yes debug_symbols=no tests=no dev_build=no use_closure_compiler=yes -j4
+            scons platform=web target="$target" arch=wasm32 threads=yes dlink_enabled=yes production=yes debug_symbols=no tests=no dev_build=no use_closure_compiler=yes -j4
+            scons platform=web target="$target" arch=wasm32 threads=no dlink_enabled=no production=yes debug_symbols=no tests=no dev_build=no use_closure_compiler=yes -j4
+            scons platform=web target="$target" arch=wasm32 threads=no dlink_enabled=yes production=yes debug_symbols=no tests=no dev_build=no use_closure_compiler=yes -j4
+          done
+      - name: Normalize outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          b=source/Engine/bin
+          mkdir out
+          cp "$b/godot.web.template_debug.wasm32.zip" out/web_debug.zip
+          cp "$b/godot.web.template_release.wasm32.zip" out/web_release.zip
+          cp "$b/godot.web.template_debug.wasm32.dlink.zip" out/web_dlink_debug.zip
+          cp "$b/godot.web.template_release.wasm32.dlink.zip" out/web_dlink_release.zip
+          cp "$b/godot.web.template_debug.wasm32.nothreads.zip" out/web_nothreads_debug.zip
+          cp "$b/godot.web.template_release.wasm32.nothreads.zip" out/web_nothreads_release.zip
+          cp "$b/godot.web.template_debug.wasm32.nothreads.dlink.zip" out/web_dlink_nothreads_debug.zip
+          cp "$b/godot.web.template_release.wasm32.nothreads.dlink.zip" out/web_dlink_nothreads_release.zip
+          test "$(find out -type f -size +0c | wc -l)" -eq 8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-web
+          path: out/
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal template
+    needs: source-gates
+    runs-on: macos-26
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | shasum -a 256 -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+      - name: Install SCons
+        shell: bash
+        run: python3 -m pip install "scons==$SCONS_VERSION"
+      - name: Build universal debug/release and bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          COMMON="platform=macos production=yes debug_symbols=no tests=no dev_build=no vulkan=no angle=no accesskit=no"
+          scons $COMMON target=template_debug arch=x86_64 lto=none -j4
+          scons $COMMON target=template_debug arch=arm64 lto=none -j4
+          scons $COMMON target=template_release arch=x86_64 lto=full -j4
+          scons $COMMON target=template_release arch=arm64 lto=full generate_bundle=yes -j4
+          test -s bin/godot_macos.zip
+      - name: Normalize output
+        shell: bash
+        run: |
+          mkdir out
+          cp source/Engine/bin/godot_macos.zip out/macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-macos
+          path: out/
+          if-no-files-found: error
+
+  ios:
+    name: iOS device + simulator template
+    needs: source-gates
+    runs-on: macos-26
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | shasum -a 256 -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+      - name: Install SCons
+        shell: bash
+        run: python3 -m pip install "scons==$SCONS_VERSION"
+      - name: Build device and simulator slices
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          COMMON="platform=ios production=yes debug_symbols=no tests=no dev_build=no vulkan=no"
+          scons $COMMON target=template_debug arch=arm64 simulator=no lto=none -j4
+          scons $COMMON target=template_release arch=arm64 simulator=no lto=none -j4
+          scons $COMMON target=template_debug arch=arm64 simulator=yes lto=none -j4
+          scons $COMMON target=template_release arch=arm64 simulator=yes lto=none -j4
+          scons $COMMON target=template_debug arch=x86_64 simulator=yes lto=none -j4
+          scons $COMMON target=template_release arch=x86_64 simulator=yes lto=none generate_bundle=yes -j4
+          test -s bin/godot_ios.zip
+      - name: Normalize output
+        shell: bash
+        run: |
+          mkdir out
+          cp source/Engine/bin/godot_ios.zip out/ios.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-ios
+          path: out/
+          if-no-files-found: error
+
+  visionos:
+    name: visionOS device + simulator template
+    needs: source-gates
+    runs-on: macos-26
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | shasum -a 256 -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+      - name: Install SCons
+        shell: bash
+        run: python3 -m pip install "scons==$SCONS_VERSION"
+      - name: Build visionOS device and simulator slices
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source/Engine
+          COMMON="platform=visionos production=yes debug_symbols=no tests=no dev_build=no vulkan=no opengl3=no"
+          scons $COMMON target=template_debug arch=arm64 simulator=no lto=none -j4
+          scons $COMMON target=template_release arch=arm64 simulator=no lto=none -j4
+          scons $COMMON target=template_debug arch=arm64 simulator=yes lto=none -j4
+          scons $COMMON target=template_release arch=arm64 simulator=yes lto=none generate_bundle=yes -j4
+          test -s bin/godot_visionos.zip
+      - name: Normalize output
+        shell: bash
+        run: |
+          mkdir out
+          cp source/Engine/bin/godot_visionos.zip out/visionos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-visionos
+          path: out/
+          if-no-files-found: error
+
+  package:
+    name: Validate and finalize complete TPZ
+    needs: [source-gates, windows, linux, android, web, macos, ios, visionos]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify source and UWP payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
+          echo "$UWP_SHA256  $UWP_ZIP" | sha256sum -c -
+          mkdir source && unzip -q "$SOURCE_ZIP" -d source
+          test -f source/Engine/SConstruct
+      - name: Derive release metadata
+        id: meta
         shell: python {0}
         run: |
           import os, sys
@@ -257,51 +482,93 @@ jobs:
           root = Path("source/Engine").resolve()
           sys.path.insert(0, str(root / "misc/uwp"))
           from package_templates import jingu_release_version, jingu_version
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              env.write("JINGU_VERSION=" + jingu_release_version(root) + "\n")
-              env.write("JINGU_COMPATIBILITY=" + jingu_version(root) + "\n")
-      - name: Download Windows x64
-        uses: actions/download-artifact@v4
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("version=" + jingu_release_version(root) + "\n")
+              out.write("compatibility=" + jingu_version(root) + "\n")
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-windows-x86-32
+          path: collected/windows-x86-32
+      - uses: actions/download-artifact@v4
         with:
           name: templates-windows-x64
           path: collected/windows-x64
-      - name: Download Windows ARM64
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: templates-windows-arm64
           path: collected/windows-arm64
-      - name: Download Linux x64
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-linux-x86-32
+          path: collected/linux-x86-32
+      - uses: actions/download-artifact@v4
         with:
           name: templates-linux-x64
           path: collected/linux-x64
-      - name: Download Linux ARM64
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-linux-arm32
+          path: collected/linux-arm32
+      - uses: actions/download-artifact@v4
         with:
           name: templates-linux-arm64
           path: collected/linux-arm64
-      - name: Stage desktop templates for finalization
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-android
+          path: collected/android
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-web
+          path: collected/web
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-macos
+          path: collected/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-ios
+          path: collected/ios
+      - uses: actions/download-artifact@v4
+        with:
+          name: templates-visionos
+          path: collected/visionos
+      - name: Stage exact template inventory
         shell: python {0}
         run: |
           import os, shutil, sys
           from pathlib import Path
-          sys.path.insert(0, str(Path("source/Engine/misc/uwp").resolve()))
-          from finalize_templates import DESKTOP_FILES, desktop_files
-          out = Path("desktop")
+          root = Path("source/Engine").resolve()
+          sys.path.insert(0, str(root / "misc/uwp"))
+          from finalize_templates import TEMPLATE_FILES, template_files
+          from package_templates import jingu_version
+          out = Path("templates")
           out.mkdir()
           seen = set()
           for file in Path("collected").rglob("*"):
-              if file.is_file():
-                  if file.name not in DESKTOP_FILES or file.name in seen:
-                      raise RuntimeError("Unexpected or duplicate desktop artifact: " + str(file))
-                  seen.add(file.name)
-                  shutil.copyfile(file, out / file.name)
-          (out / "version.txt").write_text(os.environ["JINGU_COMPATIBILITY"] + "\n", encoding="utf-8")
-          desktop_files(out, os.environ["JINGU_COMPATIBILITY"])
-      - name: Upload intermediate desktop templates (UWP still required)
-        uses: actions/upload-artifact@v4
+              if not file.is_file():
+                  continue
+              if file.name not in TEMPLATE_FILES or file.name in seen:
+                  raise RuntimeError("Unexpected or duplicate artifact: " + str(file))
+              seen.add(file.name)
+              shutil.copyfile(file, out / file.name)
+          shutil.copyfile(root / "thirdparty/icu4c/icudt_godot.dat", out / "icudt_godot.dat")
+          (out / "version.txt").write_text(jingu_version(root) + "\n", encoding="utf-8", newline="\n")
+          template_files(out, jingu_version(root), root)
+      - name: Finalize TPZ with validated UWP payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 source/Engine/misc/uwp/finalize_templates.py \
+            --source-root source/Engine \
+            --templates-root templates \
+            --uwp "$UWP_ZIP" \
+            --output-root release | tee finalizer.log
+      - uses: actions/upload-artifact@v4
         with:
-          name: JinguEngine-${{ env.JINGU_VERSION }}-Desktop-Templates-Awaiting-UWP
-          path: desktop/
+          name: JinguEngine-${{ steps.meta.outputs.version }}-Complete-Export-Templates
+          path: |
+            release/
+            finalizer.log
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
