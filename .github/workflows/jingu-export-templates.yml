@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha256:
-        description: "SHA-256 from the reviewed CLEANUP85 delivery"
+        description: "SHA-256 from the reviewed CLEANUP86 delivery"
         required: true
         type: string
 
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: JINGU_ENGINE_CLEANUP85_SOURCE.zip
+  SOURCE_ZIP: JINGU_ENGINE_CLEANUP86_SOURCE.zip
   SOURCE_SHA256: ${{ inputs.source_sha256 }}
 
 jobs:
